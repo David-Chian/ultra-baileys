@@ -248,6 +248,17 @@ export type ButtonsMessageContent = {
 	/** `buttons` and `nativeFlow` are interchangeable aliases for the button array */
 	buttons?: ButtonSpec[]
 	nativeFlow?: ButtonSpec[]
+	/**
+	 * How the buttons are encoded on the wire.
+	 * - `interactive` (default): InteractiveMessage native flow. Taps reply with
+	 *   `interactiveResponseMessage`, which clients without native-flow support show
+	 *   as "message not compatible with your version of WhatsApp" to the rest of the chat.
+	 * - `buttons`: classic ButtonsMessage. Taps reply with `buttonsResponseMessage`,
+	 *   which every client renders as a normal text bubble.
+	 *
+	 * Defaults to the `ULTRA_BAILEYS_BUTTONS_FORMAT` env var when set.
+	 */
+	buttonsFormat?: 'interactive' | 'buttons'
 	text?: string
 	caption?: string
 	footer?: string

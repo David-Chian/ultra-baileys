@@ -662,14 +662,69 @@ export const generateWAMessageContent = async (
 			m.extendedTextMessage?.text ||
 			''
 
-		m = {
-			interactiveMessage: {
-				body: { text: bodyText },
-				footer: { text: btnContent.footer || '' },
-				header,
-				nativeFlowMessage: {
-					buttons: nativeButtons,
-					messageParamsJson: '{}'
+		// 'interactive' (default) renders on modern clients and taps reply with
+		// interactiveResponseMessage — but clients that don't support that type show
+		// the reply as "message not compatible with your version of WhatsApp" to
+		// everyone else in the chat. 'buttons' emits a classic ButtonsMessage whose
+		// taps reply with buttonsResponseMessage, which every client renders as text.
+		const format = btnContent.buttonsFormat || process.env.ULTRA_BAILEYS_BUTTONS_FORMAT || 'interactive'
+
+		if (format === 'buttons') {
+			const buttonsMessage: proto.Message.IButtonsMessage = {
+				buttons: btnArray.map((b, i) => {
+					const text = b.text || b.buttonText?.displayText || ''
+					const id = b.id || b.buttonId || text || `btn_${i}`
+
+					// url/call/copy/sections have no classic equivalent — keep them native flow
+					if (b.url || b.call || b.copy || b.sections || b.name) {
+						const flow =
+							b.name && (b.buttonParamsJson || b.paramsJson)
+								? { name: b.name, buttonParamsJson: b.buttonParamsJson || b.paramsJson }
+								: buildNativeFlowButton({ ...b, text, id })
+						return {
+							buttonId: id,
+							nativeFlowInfo: { name: flow.name, paramsJson: flow.buttonParamsJson },
+							type: proto.Message.ButtonsMessage.Button.Type.NATIVE_FLOW
+						}
+					}
+
+					return {
+						buttonId: id,
+						buttonText: { displayText: text },
+						type: proto.Message.ButtonsMessage.Button.Type.RESPONSE
+					}
+				}),
+				contentText: bodyText,
+				footerText: btnContent.footer || ''
+			}
+
+			if (m.imageMessage) {
+				buttonsMessage.headerType = proto.Message.ButtonsMessage.HeaderType.IMAGE
+				buttonsMessage.imageMessage = m.imageMessage
+			} else if (m.videoMessage) {
+				buttonsMessage.headerType = proto.Message.ButtonsMessage.HeaderType.VIDEO
+				buttonsMessage.videoMessage = m.videoMessage
+			} else if (m.documentMessage) {
+				buttonsMessage.headerType = proto.Message.ButtonsMessage.HeaderType.DOCUMENT
+				buttonsMessage.documentMessage = m.documentMessage
+			} else if (btnContent.title) {
+				buttonsMessage.headerType = proto.Message.ButtonsMessage.HeaderType.TEXT
+				buttonsMessage.text = btnContent.title
+			} else {
+				buttonsMessage.headerType = proto.Message.ButtonsMessage.HeaderType.EMPTY
+			}
+
+			m = { buttonsMessage }
+		} else {
+			m = {
+				interactiveMessage: {
+					body: { text: bodyText },
+					footer: { text: btnContent.footer || '' },
+					header,
+					nativeFlowMessage: {
+						buttons: nativeButtons,
+						messageParamsJson: '{}'
+					}
 				}
 			}
 		}
