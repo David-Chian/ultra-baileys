@@ -103,10 +103,39 @@ msg.listResponseMessage?.singleSelectReply?.selectedRowId
 msg.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson // -> JSON.parse(...).id
 ```
 
+### ⚙️ Formato de botones (`buttonsFormat`)
+
+Cuando alguien toca un botón, **su teléfono** genera el mensaje de respuesta — no el bot. Según el formato con el que se enviaron los botones, esa respuesta se ve distinta para el resto del chat:
+
+| Formato | Los botones se pintan | La respuesta al tocar |
+|---|---|---|
+| `interactive` *(por defecto)* | En clientes modernos | `interactiveResponseMessage` — los clientes sin soporte muestran *"Recibiste un mensaje que no es compatible con tu versión de WhatsApp"* |
+| `buttons` | `ButtonsMessage` clásico | `buttonsResponseMessage` — **todos los clientes la ven como texto normal** |
+
+Si te molesta el aviso de "actualiza WhatsApp" que le sale a los demás, usa el formato clásico:
+
+```js
+// por mensaje
+await sock.sendMessage(jid, {
+    text: 'Elige una opción',
+    footer: 'Pie',
+    buttonsFormat: 'buttons',   // 👈
+    buttons: [{ text: 'Opción A', id: '#a' }]
+})
+```
+
+```bash
+# o globalmente, sin tocar los plugins
+ULTRA_BAILEYS_BUTTONS_FORMAT=buttons
+```
+
+Los botones de `url`, `call`, `copy` y `sections` no tienen equivalente clásico, así que siguen enviándose como native flow incluso en modo `buttons` (aunque esos no generan mensaje de respuesta, así que no producen el aviso).
+
 ## 🎛️ Variables de entorno
 
 | Variable | Efecto |
 |---|---|
+| `ULTRA_BAILEYS_BUTTONS_FORMAT=buttons` | Cambia el formato de botones a `ButtonsMessage` clásico (ver abajo) |
 | `BAILEYS_LOG_LEVEL=info` | Reactiva los logs internos (por defecto: silencio total) |
 | `ULTRA_BAILEYS_VERBOSE=1` | Muestra también el ruido de libsignal (desactiva el filtro) |
 | `ULTRA_BAILEYS_NO_BANNER=1` | Oculta el banner de arranque |
