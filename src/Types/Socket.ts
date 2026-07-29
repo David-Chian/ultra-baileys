@@ -49,6 +49,12 @@ export type SocketConfig = {
 	logger: ILogger
 	/** version to connect with */
 	version: WAVersion
+	/**
+	 * fetch the version WA Web is currently serving & connect with that instead of `version`.
+	 * WA rejects the handshake of outdated clients (405/428), so this is on by default —
+	 * it is turned off automatically when you pin `version` yourself
+	 */
+	syncWaWebVersion: boolean
 	/** override browser config */
 	browser: WABrowserDescription
 	/** Initial pushName carried in the registration ClientPayload (used by mock servers for deterministic phone assignment). */

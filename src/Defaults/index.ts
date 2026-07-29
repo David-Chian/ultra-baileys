@@ -63,6 +63,9 @@ export const DEFAULT_CACHE_TTLS = {
 
 export const DEFAULT_CONNECTION_CONFIG: SocketConfig = {
 	version: version as WAVersion,
+	// `version` above is only the fallback: by default every connection asks WA
+	// which web version it is serving right now
+	syncWaWebVersion: true,
 	browser: Browsers.macOS('Chrome'),
 	waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
 	connectTimeoutMs: 20_000,

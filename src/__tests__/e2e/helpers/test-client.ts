@@ -86,6 +86,8 @@ const attemptConnect = async (config: ResolvedConfig): Promise<AttemptOutcome> =
 	const sock = makeWASocket({
 		auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, config.logger) },
 		waWebSocketUrl: config.socketUrl,
+		// the mock server doesn't care about the web version, so skip the lookup
+		syncWaWebVersion: false,
 		pushName: config.pushName,
 		logger: config.logger,
 		agent: config.agent,

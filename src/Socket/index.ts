@@ -14,6 +14,11 @@ const makeWASocket = (config: UserFacingSocketConfig) => {
 		...config
 	}
 
+	// a version pinned by the user wins, unless they explicitly asked for the live one
+	if (config.version && config.syncWaWebVersion === undefined) {
+		newConfig.syncWaWebVersion = false
+	}
+
 	return makeCommunitiesSocket(newConfig)
 }
 
