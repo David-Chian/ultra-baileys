@@ -144,10 +144,19 @@ export const makeSocket = (config: SocketConfig) => {
 		? resolveWaWebVersion({ logger, options: config.options, timeoutMs: connectTimeoutMs }).then(liveVersion => {
 				// say it out loud as soon as we know: bots run with a silent logger &
 				// an old version is the usual reason WhatsApp refuses to link
-				printWaVersionNotice({ version: liveVersion || config.version, live: !!liveVersion })
+				printWaVersionNotice({
+					version: liveVersion || config.version,
+					source: liveVersion ? 'live' : 'bundled'
+				})
 				return liveVersion
 			})
 		: undefined
+
+	if (!config.syncWaWebVersion) {
+		// the sync is off, so the version is whatever the bot pinned -- still worth
+		// showing, since a stale pin is what breaks device linking
+		printWaVersionNotice({ version: config.version, source: 'pinned' })
+	}
 
 	/** connect with the version WA Web is serving right now, else keep the configured one */
 	const syncWaWebVersion = async () => {
