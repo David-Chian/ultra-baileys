@@ -33,6 +33,7 @@ describe('live WA Web version sync', () => {
 		await new Promise(resolve => setImmediate(resolve))
 
 		return {
+			sock,
 			cleanup: async () => {
 				await sock.end(new Error('test done'))
 				await clear()
@@ -68,6 +69,15 @@ describe('live WA Web version sync', () => {
 		const { cleanup } = await makeSock({ syncWaWebVersion: false })
 
 		expect(requestedUrls).toHaveLength(0)
+
+		await cleanup()
+	})
+
+	it('survives a version helper that hands over undefined', async () => {
+		// `version: undefined` used to wipe the fallback the handshake needs
+		const { cleanup } = await makeSock({ version: undefined })
+
+		expect(requestedUrls).toContain('https://web.whatsapp.com/sw.js')
 
 		await cleanup()
 	})

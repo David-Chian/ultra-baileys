@@ -146,7 +146,7 @@ export const makeSocket = (config: SocketConfig) => {
 	/** connect with the version WA Web is serving right now, else keep the configured one */
 	const syncWaWebVersion = async () => {
 		const liveVersion = await waWebVersionPromise
-		if (!liveVersion || liveVersion.join('.') === config.version.join('.')) {
+		if (!liveVersion || liveVersion.join('.') === config.version?.join('.')) {
 			return
 		}
 
@@ -450,6 +450,29 @@ export const makeSocket = (config: SocketConfig) => {
 		return result
 	}
 
+	let handshakeDone: () => void
+	let handshakeFailed: (err: Error) => void
+	/**
+	 * resolves once the noise handshake is over & nodes can actually reach WA.
+	 * anything sent before that is framed as a handshake message and lost
+	 */
+	const handshakePromise = new Promise<void>((resolve, reject) => {
+		handshakeDone = resolve
+		handshakeFailed = reject
+	})
+	// nobody may be waiting on it when the connection dies
+	handshakePromise.catch(() => {})
+
+	const waitForHandshake = async () => {
+		if (ws.isClosed || ws.isClosing) {
+			throw new Boom('Connection Closed', { statusCode: DisconnectReason.connectionClosed })
+		}
+
+		await promiseTimeout<void>(connectTimeoutMs, (resolve, reject) => {
+			handshakePromise.then(() => resolve(), reject)
+		})
+	}
+
 	/** connection handshake */
 	const validateConnection = async () => {
 		let helloMsg: proto.IHandshakeMessage = {
@@ -491,6 +514,7 @@ export const makeSocket = (config: SocketConfig) => {
 		)
 		await noise.finishInit()
 		startKeepAliveRequest()
+		handshakeDone()
 	}
 
 	const getAvailablePreKeysOnServer = async () => {
@@ -662,6 +686,9 @@ export const makeSocket = (config: SocketConfig) => {
 			clearWaWebVersionCache()
 		}
 
+		// fail whoever is waiting on the handshake instead of leaving them hanging
+		handshakeFailed(error || new Boom('Connection Closed', { statusCode: DisconnectReason.connectionClosed }))
+
 		clearInterval(keepAliveReq)
 		clearTimeout(qrTimer)
 
@@ -797,10 +824,22 @@ export const makeSocket = (config: SocketConfig) => {
 			throw new Error('Custom pairing code must be exactly 8 chars')
 		}
 
+		const digitsOnly = phoneNumber.replace(/\D/g, '')
+		if (!digitsOnly) {
+			throw new Boom('Phone number must contain digits, with the country code & no +, spaces or dashes', {
+				statusCode: 400
+			})
+		}
+
+		// the code is generated here, but only becomes valid once WA receives the node
+		// below -- sending it before the handshake is over would silently lose it & the
+		// phone would reject the code the user is looking at
+		await waitForHandshake()
+
 		authState.creds.pairingCode = pairingCode
 
 		authState.creds.me = {
-			id: jidEncode(phoneNumber, 's.whatsapp.net'),
+			id: jidEncode(digitsOnly, 's.whatsapp.net'),
 			name: '~'
 		}
 		ev.emit('creds.update', authState.creds)
