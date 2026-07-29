@@ -26,9 +26,12 @@ const gradientLine = (text: string, offset = 0) => {
 	)
 }
 
+/** version of this fork, shown in the banner */
+export const ULTRA_BAILEYS_VERSION = '7.0.0-rc13'
+
 let printed = false
 
-export const printBanner = (version: string) => {
+export const printBanner = (version: string = ULTRA_BAILEYS_VERSION) => {
 	if (printed || process.env.ULTRA_BAILEYS_NO_BANNER) {
 		return
 	}
@@ -62,4 +65,34 @@ export const printBanner = (version: string) => {
 	]
 
 	console.log(out.join('\n'))
+}
+
+let versionNoticePrinted = false
+
+/**
+ * Prints, once per process, which WA Web version the connection is using.
+ * Most bots run with a silent logger, so this is the only way they get to see
+ * that WA could not be reached & that an old bundled version is being used --
+ * which is exactly what makes WhatsApp refuse to link a device.
+ */
+export const printWaVersionNotice = ({ version, live }: { version: number[]; live: boolean }) => {
+	if (versionNoticePrinted || process.env.ULTRA_BAILEYS_NO_BANNER) {
+		return
+	}
+
+	versionNoticePrinted = true
+
+	const v = `v${version.join('.')}`
+
+	if (live) {
+		console.log(`${paint('◆', 105)} ${paint(`WA Web ${v} (en vivo)`, 250)}\n`)
+		return
+	}
+
+	console.log(
+		`${paint('⚠', 214)} ${paint(
+			`No se pudo consultar la versión de WA Web: se usa la incluida (${v}).`,
+			214
+		)}\n  ${paint('Si WhatsApp ya publicó una más nueva, la vinculación fallará ("código incorrecto").', 250)}\n`
+	)
 }

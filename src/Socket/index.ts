@@ -7,7 +7,7 @@ import { makeCommunitiesSocket } from './communities'
 // export the last socket layer
 const makeWASocket = (config: UserFacingSocketConfig) => {
 	installConsoleFilter()
-	printBanner('7.0.0-rc13')
+	printBanner()
 
 	const newConfig = {
 		...DEFAULT_CONNECTION_CONFIG,
