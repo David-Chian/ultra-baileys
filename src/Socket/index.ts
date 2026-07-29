@@ -19,6 +19,12 @@ const makeWASocket = (config: UserFacingSocketConfig) => {
 		newConfig.syncWaWebVersion = false
 	}
 
+	// `version: undefined` (a version helper that failed) would wipe the fallback
+	// the handshake needs, so put it back
+	if (!newConfig.version) {
+		newConfig.version = DEFAULT_CONNECTION_CONFIG.version
+	}
+
 	return makeCommunitiesSocket(newConfig)
 }
 
