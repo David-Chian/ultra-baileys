@@ -69,13 +69,22 @@ export const printBanner = (version: string = ULTRA_BAILEYS_VERSION) => {
 
 let versionNoticePrinted = false
 
+/** where the WA Web version a connection announces came from */
+export type WaVersionSource =
+	/** read from WA's servers just now */
+	| 'live'
+	/** pinned by the bot through `version` */
+	| 'pinned'
+	/** WA could not be reached, so the version shipped with the library is used */
+	| 'bundled'
+
 /**
- * Prints, once per process, which WA Web version the connection is using.
- * Most bots run with a silent logger, so this is the only way they get to see
- * that WA could not be reached & that an old bundled version is being used --
- * which is exactly what makes WhatsApp refuse to link a device.
+ * Prints, once per process, which WA Web version the connection is using & where
+ * it came from. Most bots run with a silent logger, so this is the only way they
+ * get to see that an old version is in play -- which is exactly what makes
+ * WhatsApp refuse to link a device.
  */
-export const printWaVersionNotice = ({ version, live }: { version: number[]; live: boolean }) => {
+export const printWaVersionNotice = ({ version, source }: { version: number[]; source: WaVersionSource }) => {
 	if (versionNoticePrinted || process.env.ULTRA_BAILEYS_NO_BANNER) {
 		return
 	}
@@ -84,15 +93,16 @@ export const printWaVersionNotice = ({ version, live }: { version: number[]; liv
 
 	const v = `v${version.join('.')}`
 
-	if (live) {
-		console.log(`${paint('◆', 105)} ${paint(`WA Web ${v} (en vivo)`, 250)}\n`)
+	if (source === 'bundled') {
+		console.log(
+			`${paint('⚠', 214)} ${paint(
+				`No se pudo consultar la versión de WA Web: se usa la incluida (${v}).`,
+				214
+			)}\n  ${paint('Si WhatsApp ya publicó una más nueva, la vinculación fallará ("código incorrecto").', 250)}\n`
+		)
 		return
 	}
 
-	console.log(
-		`${paint('⚠', 214)} ${paint(
-			`No se pudo consultar la versión de WA Web: se usa la incluida (${v}).`,
-			214
-		)}\n  ${paint('Si WhatsApp ya publicó una más nueva, la vinculación fallará ("código incorrecto").', 250)}\n`
-	)
+	const label = source === 'live' ? 'en vivo' : 'fijada'
+	console.log(`${paint('◆', 105)} ${paint(`WA Web ${v} (${label})`, 250)}\n`)
 }
