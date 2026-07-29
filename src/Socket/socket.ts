@@ -28,6 +28,7 @@ import {
 	bindWaitForConnectionUpdate,
 	buildPairingQRData,
 	bytesToCrockford,
+	clearWaWebVersionCache,
 	configureSuccessfulPairing,
 	Curve,
 	derivePairingCodeKey,
@@ -41,6 +42,7 @@ import {
 	makeEventBuffer,
 	makeNoiseHandler,
 	promiseTimeout,
+	resolveWaWebVersion,
 	signedKeyPair,
 	xmppSignedPreKey
 } from '../Utils'
@@ -132,6 +134,25 @@ export const makeSocket = (config: SocketConfig) => {
 		logger,
 		routingInfo: authState?.creds?.routingInfo
 	})
+
+	/**
+	 * started before the WS connect so asking WA for its current web version
+	 * overlaps with the socket coming up & costs the handshake no extra time
+	 */
+	const waWebVersionPromise = config.syncWaWebVersion
+		? resolveWaWebVersion({ logger, options: config.options, timeoutMs: connectTimeoutMs })
+		: undefined
+
+	/** connect with the version WA Web is serving right now, else keep the configured one */
+	const syncWaWebVersion = async () => {
+		const liveVersion = await waWebVersionPromise
+		if (!liveVersion || liveVersion.join('.') === config.version.join('.')) {
+			return
+		}
+
+		logger.info({ version: liveVersion, previousVersion: config.version }, 'synced to the live WA Web version')
+		config.version = liveVersion
+	}
 
 	const ws = new WebSocketClient(url, config)
 
@@ -447,6 +468,9 @@ export const makeSocket = (config: SocketConfig) => {
 
 		const keyEnc = noise.processHandshake(handshake, creds.noiseKey)
 
+		// the payload below announces the client version, so settle it first
+		await syncWaWebVersion()
+
 		let node: proto.IClientPayload
 		if (!creds.me) {
 			node = generateRegistrationNode(creds, config)
@@ -632,6 +656,11 @@ export const makeSocket = (config: SocketConfig) => {
 
 		closed = true
 		logger.info({ trace: error?.stack }, error ? 'connection errored' : 'connection closed')
+
+		// a 405 means WA turned down the version we announced, so never reuse it
+		if (error instanceof Boom && error.output?.statusCode === 405) {
+			clearWaWebVersionCache()
+		}
 
 		clearInterval(keepAliveReq)
 		clearTimeout(qrTimer)

@@ -1,7 +1,7 @@
 import { Boom } from '@hapi/boom'
 import NodeCache from '@cacheable/node-cache'
 import readline from 'readline'
-import makeWASocket, { CacheStore, DEFAULT_CONNECTION_CONFIG, DisconnectReason, fetchLatestBaileysVersion, generateMessageIDV2, getAggregateVotesInPollMessage, isJidNewsletter, makeCacheableSignalKeyStore, proto, useMultiFileAuthState, WAMessageContent, WAMessageKey } from '../src'
+import makeWASocket, { CacheStore, DEFAULT_CONNECTION_CONFIG, DisconnectReason, generateMessageIDV2, getAggregateVotesInPollMessage, isJidNewsletter, makeCacheableSignalKeyStore, proto, useMultiFileAuthState, WAMessageContent, WAMessageKey } from '../src'
 import P from 'pino'
 
 const logger = P({
@@ -43,12 +43,10 @@ const startSock = async() => {
 	if (process.env.ADV_SECRET_KEY) {
 		state.creds.advSecretKey = process.env.ADV_SECRET_KEY
 	}
-	// fetch latest version of WA Web
-	const { version, isLatest } = await fetchLatestBaileysVersion()
-	logger.debug({version: version.join('.'), isLatest}, `using latest WA version`)
-
+	// no `version` is passed on purpose: the socket asks WA which web version it is
+	// serving right now & connects with that, so the handshake is never rejected
+	// (405/428) for announcing an outdated client. pass `version` to pin one yourself.
 	const sock = makeWASocket({
-		version,
 		logger,
 		waWebSocketUrl: process.env.SOCKET_URL ?? DEFAULT_CONNECTION_CONFIG.waWebSocketUrl,
 		auth: {

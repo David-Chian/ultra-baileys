@@ -37,6 +37,7 @@
 | 📡 | **Keep-alive 10s** | Detecta caídas de conexión 3× más rápido |
 | ⏱️ | **Sin bloqueos largos** | Reintentos de transacción 30s→2.5s peor caso · link preview con tope de 1.5s |
 | 🪄 | **Arranque ligero** | Sin sincronización de historial completo |
+| 🔄 | **Versión de WA Web al día** | Cada conexión pregunta a WhatsApp qué versión está sirviendo — se acabaron los `405`/`428` al vincular ([detalles](#whatsapp-web-version-fix-for-405--428-on-pairing)) |
 | ✨ | **Banner con flow** | Sabrás que corres la versión ultra apenas arranque |
 
 ## 🔘 Botones nativos incluidos
@@ -388,6 +389,28 @@ const sock = makeWASocket({
 ```
 
 ## Important Notes About Socket Config
+
+### WhatsApp Web Version (fix for `405` / `428` on pairing)
+WhatsApp turns down the handshake of clients that announce an outdated web version, which shows up as a `405 Method Not Allowed` / `428` right when you try to get a QR or a pairing code.
+
+This fork solves it on its own: **every connection asks WhatsApp which web version it is serving right now** (`web.whatsapp.com/sw.js`, falling back to `check-update`) and connects with that one. No protobuf/platform spoofing involved — only the version.
+
+```ts
+// nothing to do: no `version` means "always the live one"
+const sock = makeWASocket({ auth: state })
+```
+
+- The fetched version is cached in memory for an hour and shared between sockets, so reconnecting costs no extra request. It is dropped automatically if WA answers `405`.
+- If WA can't be reached, the connection goes ahead with the version bundled in the library.
+- Passing `version` pins it and turns the sync off. To pin a fallback but still prefer the live version, set `syncWaWebVersion: true` as well:
+    ```ts
+    const sock = makeWASocket({
+        auth: state,
+        version: [2, 3000, 1035194821], // used only if WA can't be reached
+        syncWaWebVersion: true
+    })
+    ```
+- To opt out entirely, set `syncWaWebVersion: false`.
 
 ### Caching Group Metadata (Recommended)
 - If you use baileys for groups, we recommend you to set `cachedGroupMetadata` in socket config, you need to implement a cache like this:
