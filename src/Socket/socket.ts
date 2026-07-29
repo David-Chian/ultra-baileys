@@ -46,6 +46,7 @@ import {
 	signedKeyPair,
 	xmppSignedPreKey
 } from '../Utils'
+import { printWaVersionNotice } from '../Utils/banner'
 import {
 	assertNodeErrorFree,
 	type BinaryNode,
@@ -140,12 +141,18 @@ export const makeSocket = (config: SocketConfig) => {
 	 * overlaps with the socket coming up & costs the handshake no extra time
 	 */
 	const waWebVersionPromise = config.syncWaWebVersion
-		? resolveWaWebVersion({ logger, options: config.options, timeoutMs: connectTimeoutMs })
+		? resolveWaWebVersion({ logger, options: config.options, timeoutMs: connectTimeoutMs }).then(liveVersion => {
+				// say it out loud as soon as we know: bots run with a silent logger &
+				// an old version is the usual reason WhatsApp refuses to link
+				printWaVersionNotice({ version: liveVersion || config.version, live: !!liveVersion })
+				return liveVersion
+			})
 		: undefined
 
 	/** connect with the version WA Web is serving right now, else keep the configured one */
 	const syncWaWebVersion = async () => {
 		const liveVersion = await waWebVersionPromise
+
 		if (!liveVersion || liveVersion.join('.') === config.version?.join('.')) {
 			return
 		}
