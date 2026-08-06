@@ -1,5 +1,5 @@
 /**
- * Prints the russellxz-ultra-baileys banner once per process.
+ * Prints the David-Chian-ultra-baileys banner once per process.
  * Set ULTRA_BAILEYS_NO_BANNER=1 to disable it.
  */
 
@@ -45,8 +45,9 @@ export const printBanner = (version: string = ULTRA_BAILEYS_VERSION) => {
 		return ' '.repeat(Math.max(0, left)) + text + ' '.repeat(Math.max(0, width - visibleLength - left))
 	}
 
-	const title = 'R U S S E L L X Z'
+	const title = 'D A V I D - C H I A N'
 	const subtitle = '— u l t r a  b a i l e y s —'
+	const extraSubtitle = 'Black Diamond (◣_◢)凸'
 	const items = ['◆ modo turbo · baja latencia', '◆ botones nativos · listas · flows', '◆ consola limpia · cero ruido']
 
 	const edge = (ch: string) => paint(ch, 105)
@@ -56,6 +57,7 @@ export const printBanner = (version: string = ULTRA_BAILEYS_VERSION) => {
 		`${edge('│')}${' '.repeat(width)}${edge('│')}`,
 		`${edge('│')}${pad(`${BOLD}${gradientLine(title)}`, title.length)}${edge('│')}`,
 		`${edge('│')}${pad(gradientLine(subtitle, 3), subtitle.length)}${edge('│')}`,
+		`${edge('│')}${pad(`${DIM}${paint(extraSubtitle, 250)}${RESET}`, extraSubtitle.length)}${edge('│')}`,
 		`${edge('│')}${' '.repeat(width)}${edge('│')}`,
 		...items.map(item => `${edge('│')}${pad(paint(item, 250), item.length)}${edge('│')}`),
 		`${edge('│')}${' '.repeat(width)}${edge('│')}`,
