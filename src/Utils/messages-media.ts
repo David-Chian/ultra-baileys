@@ -181,10 +181,7 @@ export const generateProfilePicture = async (
 	let buffer: Buffer
 
 	const { full = true } = opts || {}
-	const {
-		width: w = full ? 720 : 640,
-		height: h = full ? 720 : 640
-	} = dimensions || {}
+	const { width: w = full ? 720 : 640, height: h = full ? 720 : 640 } = dimensions || {}
 
 	if (Buffer.isBuffer(mediaUpload)) {
 		buffer = mediaUpload
@@ -201,72 +198,27 @@ export const generateProfilePicture = async (
 	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
 		img = lib.sharp
 			.default(buffer)
-			.resize(
-				w,
-				h,
-				full
-					? {
-							fit: 'inside',
-							withoutEnlargement: false
-					  }
-					: undefined
-			)
+			.resize(w, h, full ? { fit: 'inside', withoutEnlargement: false } : undefined)
 			.jpeg({
 				quality: full ? 100 : 50
 			})
 			.toBuffer()
-
 	} else if ('jimp' in lib && typeof lib.jimp?.Jimp === 'function') {
 		const jimp = await (lib.jimp.Jimp as any).read(buffer)
-
-		let resized
+		let resized: any
 
 		if (full) {
 			const scale = Math.min(w / jimp.width, h / jimp.height, 1)
 			const targetW = Math.max(1, Math.round(jimp.width * scale))
 			const targetH = Math.max(1, Math.round(jimp.height * scale))
-
-			resized = jimp.resize({
-				w: targetW,
-				h: targetH,
-				mode: lib.jimp.ResizeStrategy.BILINEAR
-			})
+			resized = jimp.resize({ w: targetW, h: targetH, mode: lib.jimp.ResizeStrategy.BILINEAR })
 		} else {
 			const min = Math.min(jimp.width, jimp.height)
-
-			const cropped = jimp.crop({
-				x: 0,
-				y: 0,
-				w: min,
-				h: min
-			})
-
-			resized = cropped.resize({
-				w,
-				h,
-				mode: lib.jimp.ResizeStrategy.BILINEAR
-			})
+			const cropped = jimp.crop({ x: 0, y: 0, w: min, h: min })
+			resized = cropped.resize({ w, h, mode: lib.jimp.ResizeStrategy.BILINEAR })
 		}
 
-		img = resized.getBuffer('image/jpeg', {
-			quality: full ? 100 : 50
-		})
-
-	} else if ('napi' in lib && typeof lib.napi?.Transformer === 'function') {
-		const transformer = new lib.napi.Transformer(buffer)
-		const meta = await transformer.metadata()
-
-		if (full) {
-			img = transformer.resize(w, h).jpeg(100)
-		} else {
-			const min = Math.min(meta.width, meta.height)
-
-			img = transformer
-				.crop(0, 0, min, min)
-				.resize(w, h)
-				.jpeg(50)
-		}
-
+		img = resized.getBuffer('image/jpeg', { quality: full ? 100 : 50 })
 	} else {
 		throw new Boom('No image processing library available')
 	}
