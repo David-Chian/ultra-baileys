@@ -1,5 +1,5 @@
 import { Boom } from '@hapi/boom'
-import { exec } from 'child_process'
+import { spawn } from 'child_process'
 import * as Crypto from 'crypto'
 import { once } from 'events'
 import { createReadStream, createWriteStream, promises as fs, WriteStream } from 'fs'
@@ -31,19 +31,141 @@ import type { ILogger } from './logger'
 
 const getTmpFilesDirectory = () => tmpdir()
 
-const getImageProcessingLibrary = async () => {
+let imageProcessingLibrary: { sharp?: any; napi?: any; jimp?: any } | undefined
+
+let ffmpegAvailable: boolean | undefined
+async function assertFfmpegAvailable(): Promise<void> {
+	if (ffmpegAvailable !== undefined) {
+		if (!ffmpegAvailable) {
+			throw new Boom(
+				'ffmpeg is not installed or not on PATH. transcodeAudioToOpus() requires the `ffmpeg` binary to convert audio to PTT-compatible opus.',
+				{ statusCode: 0 }
+			)
+		}
+
+		return
+	}
+
+	ffmpegAvailable = await new Promise<boolean>(resolve => {
+		const check = spawn('ffmpeg', ['-version'])
+		check.on('error', () => resolve(false))
+		check.on('close', code => resolve(code === 0))
+	})
+
+	if (!ffmpegAvailable) {
+		throw new Boom(
+			'ffmpeg is not installed or not on PATH. transcodeAudioToOpus() requires the `ffmpeg` binary to convert audio to PTT-compatible opus.',
+			{ statusCode: 0 }
+		)
+	}
+}
+
+const MAX_CONCURRENT_TRANSCODES = 2
+let activeTranscodes = 0
+const transcodeQueue: Array<() => void> = []
+
+async function acquireTranscodeSlot(): Promise<void> {
+	if (activeTranscodes < MAX_CONCURRENT_TRANSCODES) {
+		activeTranscodes++
+		return
+	}
+
+	await new Promise<void>(resolve => transcodeQueue.push(resolve))
+	activeTranscodes++
+}
+
+function releaseTranscodeSlot(): void {
+	activeTranscodes--
+	const next = transcodeQueue.shift()
+	if (next) next()
+}
+
+export async function transcodeAudioToOpus(input: string | Buffer): Promise<string> {
+	await assertFfmpegAvailable()
+	await acquireTranscodeSlot()
+
+	const outputPath = join(tmpdir(), 'ptt-' + generateMessageIDV2() + '.ogg')
+	let inputPath = input
+	let tempInputPath: string | undefined
+
+	try {
+		if (Buffer.isBuffer(input)) {
+			tempInputPath = join(tmpdir(), 'ptt-src-' + generateMessageIDV2())
+			await fs.writeFile(tempInputPath, input)
+			inputPath = tempInputPath
+		}
+
+		await new Promise<void>((resolve, reject) => {
+			const args = [
+				'-i',
+				inputPath as string,
+				'-y',
+				'-vn', // ignore any embedded video/cover art (e.g. mp3 with artwork)
+				'-ac',
+				'1', // mono
+				'-ar',
+				'16000', // 16kHz - exact spec of WhatsApp's native PTT
+				'-c:a',
+				'libopus', // real opus codec, not just the mimetype label
+				'-b:a',
+				'32k',
+				'-f',
+				'ogg',
+				outputPath
+			]
+			const child = spawn('ffmpeg', args)
+
+			let stderr = ''
+			child.stderr?.on('data', chunk => {
+				stderr += chunk
+			})
+
+			child.on('error', reject)
+			child.on('close', code => {
+				if (code === 0) {
+					resolve()
+				} else {
+					reject(new Boom(`ffmpeg exited with code ${code}`, { data: stderr }))
+				}
+			})
+		})
+
+		return outputPath
+	} catch (err) {
+		await fs.unlink(outputPath).catch(() => {})
+		throw err
+	} finally {
+		releaseTranscodeSlot()
+		if (tempInputPath) {
+			await fs.unlink(tempInputPath).catch(() => {})
+		}
+	}
+}
+
+export const getImageProcessingLibrary = async () => {
+	if (imageProcessingLibrary) {
+		return imageProcessingLibrary
+	}
+
 	//@ts-ignore
-	const [jimp, sharp] = await Promise.all([import('jimp').catch(() => {}), import('sharp').catch(() => {})])
+	const [jimp, sharp, napi] = await Promise.all([
+		import('jimp').catch(() => {}),
+		import('sharp').catch(() => {}),
+		//@ts-ignore
+		import('@napi-rs/image').catch(() => {})
+	])
 
 	if (sharp) {
-		return { sharp }
+		imageProcessingLibrary = { sharp }
+	} else if (napi) {
+		imageProcessingLibrary = { napi }
+	} else if (jimp) {
+		imageProcessingLibrary = { jimp }
+	} else {
+		throw new Boom('No image processing library available')
 	}
 
-	if (jimp) {
-		return { jimp }
-	}
-
-	throw new Boom('No image processing library available')
+	return imageProcessingLibrary
 }
 
 export const hkdfInfoKey = (type: MediaType) => {
@@ -122,12 +244,33 @@ const extractVideoThumb = async (
 	size: { width: number; height: number }
 ) =>
 	new Promise<void>((resolve, reject) => {
-		const cmd = `ffmpeg -ss ${time} -i ${path} -y -vf scale=${size.width}:-1 -vframes 1 -f image2 ${destPath}`
-		exec(cmd, err => {
-			if (err) {
-				reject(err)
-			} else {
+		const args = [
+			'-ss',
+			time,
+			'-i',
+			path,
+			'-y',
+			'-vf',
+			`scale=${size.width}:-1`,
+			'-vframes',
+			'1',
+			'-f',
+			'image2',
+			destPath
+		]
+		const child = spawn('ffmpeg', args)
+
+		let stderr = ''
+		child.stderr?.on('data', chunk => {
+			stderr += chunk
+		})
+
+		child.on('error', reject)
+		child.on('close', code => {
+			if (code === 0) {
 				resolve()
+			} else {
+				reject(new Boom(`ffmpeg exited with code ${code}`, { data: stderr }))
 			}
 		})
 	})
@@ -165,6 +308,19 @@ export const extractImageThumb = async (bufferOrFilePath: Readable | Buffer | st
 			buffer,
 			original: dimensions
 		}
+	} else if ('napi' in lib && typeof lib.napi?.Transformer === 'function') {
+		const input =
+			typeof bufferOrFilePath === 'string' ? await fs.readFile(bufferOrFilePath) : bufferOrFilePath
+		const img = new lib.napi.Transformer(input)
+		const meta = await img.metadata()
+		const buffer = await img.resize(width).jpeg(50)
+		return {
+			buffer,
+			original: {
+				width: meta.width,
+				height: meta.height
+			}
+		}
 	} else {
 		throw new Boom('No image processing library available')
 	}
@@ -176,7 +332,9 @@ export const encodeBase64EncodedStringForUpload = (b64: string) =>
 export const generateProfilePicture = async (
 	mediaUpload: WAMediaUpload,
 	dimensions?: { width: number; height: number },
-	opts?: { full?: boolean }
+	opts?: {
+		full?: boolean
+	}
 ) => {
 	let buffer: Buffer
 
@@ -194,7 +352,6 @@ export const generateProfilePicture = async (
 
 	const lib = await getImageProcessingLibrary()
 	let img: Promise<Buffer>
-
 	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
 		img = lib.sharp
 			.default(buffer)
@@ -205,8 +362,8 @@ export const generateProfilePicture = async (
 			.toBuffer()
 	} else if ('jimp' in lib && typeof lib.jimp?.Jimp === 'function') {
 		const jimp = await (lib.jimp.Jimp as any).read(buffer)
-		let resized: any
 
+		let resized
 		if (full) {
 			const scale = Math.min(w / jimp.width, h / jimp.height, 1)
 			const targetW = Math.max(1, Math.round(jimp.width * scale))
@@ -219,6 +376,16 @@ export const generateProfilePicture = async (
 		}
 
 		img = resized.getBuffer('image/jpeg', { quality: full ? 100 : 50 })
+	} else if ('napi' in lib && typeof lib.napi?.Transformer === 'function') {
+		const transformer = new lib.napi.Transformer(buffer)
+		const meta = await transformer.metadata()
+
+		if (full) {
+			img = transformer.resize(w, h).jpeg(100)
+		} else {
+			const min = Math.min(meta.width, meta.height)
+			img = transformer.crop(0, 0, min, min).resize(w, h).jpeg(50)
+		}
 	} else {
 		throw new Boom('No image processing library available')
 	}
@@ -691,6 +858,7 @@ const isNodeRuntime = (): boolean => {
 type MediaUploadResult = {
 	url?: string
 	direct_path?: string
+	handle?: string
 	meta_hmac?: string
 	ts?: number
 	fbid?: number
@@ -844,8 +1012,7 @@ export const getWAUploadToServer = (
 		// send a query JSON to obtain the url & auth token to upload our media
 		let uploadInfo = await refreshMediaConn(false)
 
-		let urls: { mediaUrl: string; directPath: string; meta_hmac?: string; ts?: number; fbid?: number } | undefined
-		const hosts = [...customUploadHosts, ...uploadInfo.hosts]
+		let urls: { mediaUrl: string; directPath: string; handle?: string; meta_hmac?: string; ts?: number; fbid?: number } | undefined
 
 		fileEncSha256B64 = encodeBase64EncodedStringForUpload(fileEncSha256B64)
 
@@ -859,47 +1026,61 @@ export const getWAUploadToServer = (
 		const headers = {
 			...customHeaders,
 			'Content-Type': 'application/octet-stream',
-			Origin: DEFAULT_ORIGIN
+			Origin: DEFAULT_ORIGIN,
+			'User-Agent':
+				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+			Accept: '*/*'
 		}
 
-		for (const { hostname } of hosts) {
-			logger.debug(`uploading to "${hostname}"`)
+		const maxRetries = 2
+		for (let attempt = 0; attempt < maxRetries && !urls; attempt++) {
+			if (attempt > 0) {
+				logger.info(`retrying upload (attempt ${attempt + 1}/${maxRetries})...`)
+				uploadInfo = await refreshMediaConn(true)
+			}
 
-			const auth = encodeURIComponent(uploadInfo.auth)
-			const url = `https://${hostname}${MEDIA_PATH_MAP[mediaType]}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}`
+			const hosts = [...customUploadHosts, ...uploadInfo.hosts]
 
-			let result: MediaUploadResult | undefined
-			try {
-				result = await uploadMedia(
-					{
-						url,
-						filePath,
-						headers,
-						timeoutMs,
-						agent: fetchAgent
-					},
-					logger
-				)
+			for (const { hostname } of hosts) {
+				logger.debug(`uploading to "${hostname}"`)
 
-				if (result?.url || result?.direct_path) {
-					urls = {
-						mediaUrl: result.url!,
-						directPath: result.direct_path!,
-						meta_hmac: result.meta_hmac,
-						fbid: result.fbid,
-						ts: result.ts
+				const auth = encodeURIComponent(uploadInfo.auth)
+				const url = `https://${hostname}${MEDIA_PATH_MAP[mediaType]}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}`
+
+				let result: MediaUploadResult | undefined
+				try {
+					result = await uploadMedia(
+						{
+							url,
+							filePath,
+							headers,
+							timeoutMs: timeoutMs || 60_000,
+							agent: fetchAgent
+						},
+						logger
+					)
+
+					if (result?.url || result?.direct_path) {
+						urls = {
+							mediaUrl: result.url!,
+							directPath: result.direct_path!,
+							handle: result.handle,
+							meta_hmac: result.meta_hmac,
+							fbid: result.fbid,
+							ts: result.ts
+						}
+						logger.info(`upload successful to host: ${hostname}`)
+						break
+					} else {
+						throw new Error(`upload failed, reason: ${JSON.stringify(result)}`)
 					}
-					break
-				} else {
-					uploadInfo = await refreshMediaConn(true)
-					throw new Error(`upload failed, reason: ${JSON.stringify(result)}`)
+				} catch (error: any) {
+					const isLast = hostname === hosts[hosts.length - 1]?.hostname
+					logger.warn(
+						{ trace: error?.stack, uploadResult: result },
+						`Error in uploading to ${hostname} ${isLast ? '' : ', retrying...'}`
+					)
 				}
-			} catch (error: any) {
-				const isLast = hostname === hosts[uploadInfo.hosts.length - 1]?.hostname
-				logger.warn(
-					{ trace: error?.stack, uploadResult: result },
-					`Error in uploading to ${hostname} ${isLast ? '' : ', retrying...'}`
-				)
 			}
 		}
 
@@ -1012,3 +1193,155 @@ const MEDIA_RETRY_STATUS_MAP = {
 	[proto.MediaRetryNotification.ResultType.NOT_FOUND]: 404,
 	[proto.MediaRetryNotification.ResultType.GENERAL_ERROR]: 418
 } as const
+
+const runFfmpegBuffer = (args: string[], input: Buffer): Promise<Buffer> => {
+	return new Promise((resolve, reject) => {
+		const ff = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'ignore'] })
+		const chunks: Buffer[] = []
+		let len = 0
+		ff.stdout.on('data', (c: Buffer) => {
+			chunks.push(c)
+			len += c.length
+		})
+		ff.on('close', code => (code === 0 ? resolve(Buffer.concat(chunks, len)) : reject(new Boom(`ffmpeg exited with code ${code}`))))
+		ff.on('error', reject)
+		ff.stdin.end(input)
+	})
+}
+
+export const resizeImage = async (
+	buf: Buffer,
+	width: number,
+	height: number,
+	opts: { quality?: number } = {}
+): Promise<Buffer> => {
+	const { quality = 80 } = opts
+	const lib = await getImageProcessingLibrary()
+	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
+		return lib.sharp.default(buf).resize(width, height, { fit: 'inside' }).jpeg({ quality }).toBuffer()
+	}
+
+	//@ts-ignore
+	const jimpMod = await import('jimp').catch(() => undefined)
+	if (jimpMod) {
+		const Jimp = (jimpMod as any).default || jimpMod
+		const img = await Jimp.read(buf)
+		img.resize(width, height)
+		img.quality(quality)
+		return img.getBufferAsync(Jimp.MIME_JPEG)
+	}
+
+	throw new Boom('resizeImage requires "sharp" or "jimp" to be installed', { statusCode: 500 })
+}
+
+export const convertMedia = async (buf: Buffer, opts: { to: string }): Promise<Buffer> => {
+	const fmt = opts.to.toLowerCase().replace('.', '')
+	const imageFormats: Record<string, 'jpeg' | 'png' | 'webp'> = { jpeg: 'jpeg', jpg: 'jpeg', png: 'png', webp: 'webp' }
+
+	if (imageFormats[fmt]) {
+		const lib = await getImageProcessingLibrary()
+		if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
+			return lib.sharp.default(buf).toFormat(imageFormats[fmt]).toBuffer()
+		}
+
+		throw new Boom('convertMedia to an image format requires "sharp" to be installed', { statusCode: 500 })
+	}
+
+	const args = ['-i', 'pipe:0', '-y']
+	if (fmt === 'mp4') {
+		args.push('-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4')
+	} else {
+		args.push('-f', fmt)
+	}
+
+	args.push('pipe:1')
+	return runFfmpegBuffer(args, buf)
+}
+
+export const imageToWebpSticker = async (buf: Buffer, opts: { quality?: number } = {}): Promise<Buffer> => {
+	const { quality = 80 } = opts
+	const lib = await getImageProcessingLibrary()
+	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
+		return lib.sharp
+			.default(buf)
+			.resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+			.webp({ quality })
+			.toBuffer()
+	}
+
+	throw new Boom('imageToWebpSticker requires "sharp" to be installed', { statusCode: 500 })
+}
+
+export const compressMedia = async (buf: Buffer, opts: { quality?: number } = {}): Promise<Buffer> => {
+	const { quality = 50 } = opts
+	const lib = await getImageProcessingLibrary()
+	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
+		try {
+			const { format } = await lib.sharp.default(buf).metadata()
+			if (format) {
+				return lib.sharp.default(buf).toFormat(format, { quality }).toBuffer()
+			}
+		} catch {}
+	}
+
+	const crf = String(Math.round(51 - (quality / 100) * 51))
+	return runFfmpegBuffer(
+		['-i', 'pipe:0', '-y', '-crf', crf, '-preset', 'ultrafast', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'],
+		buf
+	)
+}
+
+export type MediaMetadataResult = {
+	size: number
+	mimetype?: string
+	width?: number
+	height?: number
+	channels?: number
+	hasAlpha?: boolean
+	duration?: number
+}
+
+export const getMediaMetadata = async (buf: Buffer): Promise<MediaMetadataResult> => {
+	const result: MediaMetadataResult = { size: buf.length }
+
+	const lib = await getImageProcessingLibrary()
+	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
+		try {
+			const meta = await lib.sharp.default(buf).metadata()
+			if (meta.format) {
+				result.mimetype = `image/${meta.format}`
+				result.width = meta.width
+				result.height = meta.height
+				result.channels = meta.channels
+				result.hasAlpha = meta.hasAlpha
+				return result
+			}
+		} catch {}
+	}
+
+	return new Promise(resolve => {
+		const ff = spawn('ffprobe', ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', 'pipe:0'], {
+			stdio: ['pipe', 'pipe', 'ignore']
+		})
+		const chunks: Buffer[] = []
+		ff.stdout.on('data', (c: Buffer) => chunks.push(c))
+		ff.on('close', () => {
+			try {
+				const d = JSON.parse(Buffer.concat(chunks).toString())
+				const vid = d.streams?.find((s: any) => s.codec_type === 'video')
+				const aud = d.streams?.find((s: any) => s.codec_type === 'audio')
+				if (vid) {
+					result.width = vid.width
+					result.height = vid.height
+				}
+
+				result.duration = parseFloat(d.format?.duration) || undefined
+				result.mimetype = vid ? 'video/mp4' : aud ? 'audio/mpeg' : undefined
+			} catch {}
+
+			resolve(result)
+		})
+		ff.on('error', () => resolve(result))
+		ff.stdin.end(buf)
+	})
+}
