@@ -163,6 +163,24 @@ export type AlbumMessageOptions = {
 	expectedVideoCount?: number
 }
 
+export type WAStickerPackSticker = {
+        sticker: WAMediaUpload
+        data?: WAMediaUpload
+        isAnimated?: boolean
+        isLottie?: boolean
+        emojis?: string[]
+        accessibilityLabel?: string
+}
+
+export type WAStickerPackContent = {
+        name: string
+        publisher?: string
+        packId?: string
+        description?: string
+        cover: WAMediaUpload
+        stickers: WAStickerPackSticker[]
+}
+
 type SharePhoneNumber = {
 	sharePhoneNumber: boolean
 }
