@@ -1,6 +1,8 @@
 import { Boom } from '@hapi/boom'
-import { randomBytes } from 'crypto'
+import { createCipheriv, createHash, createHmac, randomBytes } from 'crypto'
 import { promises as fs } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { type Transform } from 'stream'
 import { proto } from '../../WAProto/index.js'
 import {
@@ -27,6 +29,7 @@ import type {
 	WAMessage,
 	WAMessageContent,
 	WAMessageKey,
+	WAStickerPackContent,
 	WATextMessage
 } from '../Types'
 import { WAMessageStatus, WAProto } from '../Types'
@@ -41,7 +44,10 @@ import {
 	generateThumbnail,
 	getAudioDuration,
 	getAudioWaveform,
+	getMediaKeys,
 	getRawMediaUploadData,
+	getStream,
+	toBuffer,
 	type MediaDownloadOptions
 } from './messages-media'
 import { shouldIncludeReportingToken } from './reporting-utils'
@@ -122,6 +128,185 @@ const assertColor = async (color: any) => {
 
 		assertedColor = parseInt(hex, 16)
 		return assertedColor
+	}
+}
+
+const isWebPBuffer = (buf: Buffer): boolean =>
+	buf.length >= 12 &&
+	buf[0] === 0x52 &&
+	buf[1] === 0x49 &&
+	buf[2] === 0x46 &&
+	buf[3] === 0x46 &&
+	buf[8] === 0x57 &&
+	buf[9] === 0x45 &&
+	buf[10] === 0x42 &&
+	buf[11] === 0x50
+
+const isAnimatedWebP = (buf: Buffer): boolean => {
+	if (!isWebPBuffer(buf)) {
+		return false
+	}
+
+	let offset = 12
+	while (offset < buf.length - 8) {
+		const fourCC = buf.toString('ascii', offset, offset + 4)
+		const chunkSize = buf.readUInt32LE(offset + 4)
+		if (fourCC === 'VP8X') {
+			const flagsOffset = offset + 8
+			if (flagsOffset < buf.length && (buf[flagsOffset]! & 0x02) !== 0) {
+				return true
+			}
+		} else if (fourCC === 'ANIM' || fourCC === 'ANMF') {
+			return true
+		}
+
+		offset += 8 + chunkSize + (chunkSize % 2)
+	}
+
+	return false
+}
+
+const encryptMediaBuffer = async (buf: Buffer, mediaKey: Buffer) => {
+	const { cipherKey, iv, macKey } = await getMediaKeys(mediaKey, 'sticker-pack')
+	const aes = createCipheriv('aes-256-cbc', cipherKey, iv)
+	const hmac = createHmac('sha256', macKey!).update(iv)
+	const encPart1 = aes.update(buf)
+	const encPart2 = aes.final()
+	hmac.update(encPart1).update(encPart2)
+	const mac = hmac.digest().subarray(0, 10)
+	const encBody = Buffer.concat([encPart1, encPart2, mac])
+	const fileEncSha256 = createHash('sha256').update(encPart1).update(encPart2).update(mac).digest()
+	const fileSha256 = createHash('sha256').update(buf).digest()
+	return { encBody, fileSha256, fileEncSha256 }
+}
+
+export const generateStickerPackMessage = async (
+	stickerPack: WAStickerPackContent,
+	options: MessageContentGenerationOptions
+): Promise<proto.Message.IStickerPackMessage> => {
+	const { stickers, cover, name, publisher, packId, description } = stickerPack
+	if (!stickers || stickers.length === 0) {
+		throw new Boom('Sticker pack must contain at least one sticker', { statusCode: 400 })
+	}
+
+	if (stickers.length > 120) {
+		throw new Boom('Sticker pack exceeds the maximum limit of 120 stickers', { statusCode: 400 })
+	}
+
+	const [sharpLib, jimpLib] = await Promise.all([
+		import('sharp').catch(() => null),
+		import('jimp').catch(() => null)
+	])
+
+	const stickerPackId = packId || generateMessageIDV2()
+	const stickerData: import('fflate').Zippable = {}
+
+	const stickerMetadata = await Promise.all(
+		stickers.map(async (s, i) => {
+			const source = s.sticker ?? s.data
+			if (!source) {
+				throw new Boom(`Sticker at index ${i} is missing its image data`, { statusCode: 400 })
+			}
+
+			const { stream } = await getStream(source)
+			const buffer = await toBuffer(stream)
+
+			let webpBuffer: Buffer
+			let isAnimated = false
+			if (isWebPBuffer(buffer)) {
+				webpBuffer = buffer
+				isAnimated = isAnimatedWebP(buffer)
+			} else if (sharpLib) {
+				webpBuffer = await sharpLib.default(buffer).webp().toBuffer()
+			} else if (jimpLib) {
+				const Jimp = (jimpLib as any).Jimp || (jimpLib as any).default
+				const jimpImage = await Jimp.read(buffer)
+				webpBuffer = await jimpImage
+					.resize({ w: 512, h: 512, mode: (jimpLib as any).ResizeStrategy?.BILINEAR })
+					.getBuffer('image/webp')
+			} else {
+				webpBuffer = buffer
+			}
+
+			if (webpBuffer.length > 1024 * 1024) {
+				throw new Boom(`Sticker at index ${i} exceeds the 1MB size limit`, { statusCode: 400 })
+			}
+
+			const fileName = `${i + 1}.webp`
+			stickerData[fileName] = [new Uint8Array(webpBuffer), { level: 0 }]
+
+			return {
+				fileName,
+				mimetype: 'image/webp',
+				isAnimated: s.isAnimated !== undefined ? s.isAnimated : isAnimated,
+				isLottie: s.isLottie || false,
+				emojis: s.emojis || [],
+				accessibilityLabel: s.accessibilityLabel || ''
+			}
+		})
+	)
+
+	const { stream: coverStream } = await getStream(cover)
+	const coverBuffer = await toBuffer(coverStream)
+	const coverFileName = `${stickerPackId}.webp`
+	stickerData[coverFileName] = [new Uint8Array(coverBuffer), { level: 0 }]
+
+	const { zipSync } = await import('fflate')
+	const zipBuffer = Buffer.from(zipSync(stickerData))
+
+	const mediaKey = randomBytes(32)
+
+	const zipEnc = await encryptMediaBuffer(zipBuffer, mediaKey)
+	const zipEncPath = join(tmpdir(), 'stickerpack_' + stickerPackId)
+	await fs.writeFile(zipEncPath, zipEnc.encBody)
+	let stickerPackUploadResult: { mediaUrl: string; directPath: string }
+	try {
+		stickerPackUploadResult = await options.upload(zipEncPath, {
+			fileEncSha256B64: zipEnc.fileEncSha256.toString('base64'),
+			mediaType: 'sticker-pack',
+			timeoutMs: options.mediaUploadTimeoutMs
+		})
+	} finally {
+		await fs.unlink(zipEncPath).catch(() => {})
+	}
+
+	const thumbEnc = await encryptMediaBuffer(coverBuffer, mediaKey)
+	const thumbEncPath = join(tmpdir(), 'stickerthumb_' + stickerPackId)
+	await fs.writeFile(thumbEncPath, thumbEnc.encBody)
+	let thumbUploadResult: { mediaUrl: string; directPath: string }
+	try {
+		thumbUploadResult = await options.upload(thumbEncPath, {
+			fileEncSha256B64: thumbEnc.fileEncSha256.toString('base64'),
+			mediaType: 'thumbnail-sticker-pack',
+			timeoutMs: options.mediaUploadTimeoutMs
+		})
+	} finally {
+		await fs.unlink(thumbEncPath).catch(() => {})
+	}
+
+	const imageDataHash = sha256(coverBuffer).toString('base64')
+
+	return {
+		name,
+		publisher,
+		stickerPackId,
+		packDescription: description,
+		stickerPackOrigin: proto.Message.StickerPackMessage.StickerPackOrigin.USER_CREATED,
+		stickerPackSize: zipBuffer.length,
+		stickers: stickerMetadata,
+		fileSha256: zipEnc.fileSha256,
+		fileEncSha256: zipEnc.fileEncSha256,
+		mediaKey,
+		directPath: stickerPackUploadResult.directPath,
+		fileLength: zipBuffer.length,
+		mediaKeyTimestamp: unixTimestampSeconds(),
+		trayIconFileName: coverFileName,
+		imageDataHash,
+		thumbnailDirectPath: thumbUploadResult.directPath,
+		thumbnailSha256: thumbEnc.fileSha256,
+		thumbnailEncSha256: thumbEnc.fileEncSha256,
+		thumbnailHeight: 96,
+		thumbnailWidth: 96
 	}
 }
 
@@ -611,6 +796,12 @@ export const generateWAMessageContent = async (
 				initiatedByMe: true
 			}
 		}
+	} else if (hasNonNullishProperty(message, 'stickerPack')) {
+		m.stickerPackMessage = await generateStickerPackMessage(message.stickerPack, options)
+		m.stickerPackMessage.contextInfo = {
+			...(message.contextInfo || {}),
+			...(message.mentions ? { mentionedJid: message.mentions } : {})
+		}
 	} else if (hasNonNullishProperty(message, 'buttons') || hasNonNullishProperty(message, 'nativeFlow')) {
 		const media = message as unknown as Record<string, unknown>
 		if (media.image || media.video || media.document) {
@@ -747,6 +938,10 @@ export const generateWAMessageContent = async (
 
 		delete m.extendedTextMessage
 		delete m.conversation
+	}
+
+	if (hasOptionalProperty(message, 'isLottie') && !!message.isLottie) {
+		m = { lottieStickerMessage: { message: m } }
 	}
 
 	if (hasOptionalProperty(message, 'viewOnce') && !!message.viewOnce) {
@@ -961,7 +1156,8 @@ export const normalizeMessageContent = (content: WAMessageContent | null | undef
 			message?.editedMessage ||
 			message?.associatedChildMessage ||
 			message?.groupStatusMessage ||
-			message?.groupStatusMessageV2
+			message?.groupStatusMessageV2 ||
+			message?.lottieStickerMessage
 		)
 	}
 }
