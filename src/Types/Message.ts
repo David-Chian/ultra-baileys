@@ -13,6 +13,7 @@ export type WAMessage = proto.IWebMessageInfo & {
 	messageStubParameters?: any
 	category?: string
 	retryCount?: number
+	isSystemNotification?: boolean
 }
 export type WAMessageContent = proto.IMessage
 export type WAContactMessage = proto.Message.IContactMessage
@@ -124,6 +125,12 @@ type Contextable = {
 }
 type ViewOnce = {
 	viewOnce?: boolean
+	viewOnceV2?: boolean
+	viewOnceV2Extension?: boolean
+}
+
+type AiLabelable = {
+	ai?: boolean
 }
 
 type Editable = {
@@ -217,6 +224,7 @@ export type AnyMediaMessageContent = (
 	| ({
 			sticker: WAMediaUpload
 			isAnimated?: boolean
+			isLottie?: boolean
 	  } & WithDimensions)
 	| ({
 			document: WAMediaUpload
@@ -260,6 +268,46 @@ export type ButtonSpec = {
 	buttonParamsJson?: string
 	paramsJson?: string
 }
+
+/** generic native-flow button shape (id / url / call / copy / sections / raw name+paramsJson) */
+export type WAButtonContent = {
+	text?: string
+	buttonText?: string
+	icon?: string
+} & (
+	| { id: string }
+	| { url: string; useWebview?: boolean }
+	| { call: string }
+	| { copy: string }
+	| { sections: WAListSection[] }
+	| { name: string; paramsJson?: string }
+)
+
+export type WAListSection = {
+	title?: string
+	rows: {
+		title: string
+		rowId: string
+		description?: string
+	}[]
+}
+
+export type WATemplateButton =
+	| { text?: string; buttonText?: string; id: string }
+	| { text?: string; buttonText?: string; url: string }
+	| { text?: string; buttonText?: string; call: string }
+
+export type WACarouselCard = {
+	text?: string
+	caption?: string
+	title?: string
+	subtitle?: string
+	footer?: string
+	thumbnail?: WAMediaUpload
+	audioFooter?: WAMediaUpload
+	nativeFlow?: WAButtonContent[]
+} & AnyMediaMessageContent &
+	Contextable
 
 /** interactive message with native-flow buttons, optionally with a media header */
 export type ButtonsMessageContent = {
@@ -367,8 +415,20 @@ export type AnyRegularMessageContent = (
 	| RequestPhoneNumber
 	| ButtonsMessageContent
 	| ListMessageContent
+	| ({
+			templateButtons: WATemplateButton[]
+			footer?: string
+			id?: string
+			text?: string
+	  } & Contextable)
+	| ({
+			cards: WACarouselCard[]
+			footer?: string
+	  } & Contextable)
+	| (proto.IMessage & { raw: true })
 ) &
-	ViewOnce
+	ViewOnce &
+	AiLabelable
 
 export type AnyMessageContent =
 	| AnyRegularMessageContent
@@ -386,6 +446,10 @@ export type AnyMessageContent =
 	| {
 			limitSharing: boolean
 	  }
+	| ({
+			stickerPack: WAStickerPackContent
+	  } & Mentionable &
+			Contextable)
 
 export type GroupMetadataParticipants = Pick<GroupMetadata, 'participants'>
 
@@ -433,7 +497,7 @@ export type MessageGenerationOptionsFromContent = MiscMessageGenerationOptions &
 export type WAMediaUploadFunction = (
 	encFilePath: string,
 	opts: { fileEncSha256B64: string; mediaType: MediaType; timeoutMs?: number }
-) => Promise<{ mediaUrl: string; directPath: string; meta_hmac?: string; ts?: number; fbid?: number }>
+) => Promise<{ mediaUrl: string; directPath: string; handle?: string; meta_hmac?: string; ts?: number; fbid?: number }>
 
 export type MediaGenerationOptions = {
 	logger?: ILogger
