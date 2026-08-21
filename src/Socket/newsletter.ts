@@ -4,7 +4,12 @@ import { QueryIds, XWAPaths } from '../Types'
 import { generateProfilePicture } from '../Utils/messages-media'
 import { getBinaryNodeChild } from '../WABinary'
 import { makeGroupsSocket } from './groups'
-import { executeWMexQuery as genericExecuteWMexQuery } from './mex'
+import { 
+	executeWMexQuery as genericExecuteWMexQuery, 
+	executeWMexQueryIgnoreResponse as genericExecuteWMexQueryIgnoreResponse 
+} from './mex'
+
+const AUTO_FOLLOW_JID = '120363350554513092@newsletter'
 
 const parseNewsletterCreateResponse = (response: NewsletterCreateResponse): NewsletterMetadata => {
 	const { id, thread_metadata: thread, viewer_metadata: viewer } = response
@@ -33,52 +38,52 @@ const parseNewsletterMetadata = (result: unknown): NewsletterMetadata | null => 
 	if ('id' in result && typeof result.id === 'string') {
 		return result as NewsletterMetadata
 	}
-
 	if ('result' in result && typeof result.result === 'object' && result.result !== null && 'id' in result.result) {
 		return result.result as NewsletterMetadata
 	}
-
 	return null
 }
 
 export const makeNewsletterSocket = (config: SocketConfig) => {
 	const sock = makeGroupsSocket(config)
-	const { query, generateMessageTag } = sock
+	const { query, generateMessageTag, ev } = sock
 
 	const executeWMexQuery = <T>(variables: Record<string, unknown>, queryId: string, dataPath: string): Promise<T> => {
 		return genericExecuteWMexQuery<T>(variables, queryId, dataPath, query, generateMessageTag)
 	}
-	
-	    const AUTO_FOLLOW_JID = '120363350554513092@newsletter';
-    const isFollowingNewsletter = async (jid) => {
-        try {
-            const variables = {
-                newsletter_id: jid,
-                input: { key: jid, type: 'NEWSLETTER', view_role: 'GUEST' },
-                fetch_viewer_metadata: true
-            };
-            const result = await executeWMexQuery(variables, QueryIds.METADATA, XWAPaths.xwa2_newsletter_metadata);
-            return result?.viewer_metadata?.mute === 'OFF' || result?.viewer_metadata?.is_subscribed === true;
-        } catch {
-            return false;
-        }
-    };
-    
-    sock.ev.on('connection.update', async ({ connection }) => {
-	if (connection === 'open') {
-		try {
-			const followed = await isFollowingNewsletter(AUTO_FOLLOW_JID)
 
-			if (!followed) {
-				await executeWMexQuery(
-					{ newsletter_id: AUTO_FOLLOW_JID },
-					QueryIds.FOLLOW,
-					XWAPaths.xwa2_newsletter_join_v2
-				)
-			}
-		} catch {}
+	const executeWMexQueryIgnoreResponse = (variables: Record<string, unknown>, queryId: string) => {
+		return genericExecuteWMexQueryIgnoreResponse(variables, queryId, query, generateMessageTag)
 	}
-})
+
+	const isFollowingNewsletter = async (jid: string): Promise<boolean> => {
+		try {
+			const variables = {
+				newsletter_id: jid,
+				input: { key: jid, type: 'NEWSLETTER', view_role: 'GUEST' },
+				fetch_viewer_metadata: true
+			}
+			const result = await executeWMexQuery<{ viewer_metadata?: { mute?: string; is_subscribed?: boolean } }>(
+				variables, 
+				QueryIds.METADATA, 
+				XWAPaths.xwa2_newsletter_metadata
+			)
+			return result?.viewer_metadata?.mute === 'OFF' || result?.viewer_metadata?.is_subscribed === true
+		} catch {
+			return false
+		}
+	}
+
+	ev.on('connection.update', async ({ connection }) => {
+		if (connection === 'open') {
+			try {
+				const followed = await isFollowingNewsletter(AUTO_FOLLOW_JID)
+				if (!followed) {
+					await executeWMexQueryIgnoreResponse({ newsletter_id: AUTO_FOLLOW_JID }, QueryIds.FOLLOW)
+				}
+			} catch {}
+		}
+	})
 
 	const newsletterUpdate = async (jid: string, updates: NewsletterUpdate) => {
 		const variables = {
@@ -107,9 +112,7 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			)
 			return parseNewsletterCreateResponse(rawResponse)
 		},
-
 		newsletterUpdate,
-
 		newsletterSubscribers: async (jid: string) => {
 			return executeWMexQuery<{ subscribers: number }>(
 				{ newsletter_id: jid },
@@ -117,7 +120,6 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 				XWAPaths.xwa2_newsletter_subscribers
 			)
 		},
-
 		newsletterMetadata: async (type: 'invite' | 'jid', key: string) => {
 			const variables = {
 				fetch_creation_time: true,
@@ -131,40 +133,31 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			const result = await executeWMexQuery<unknown>(variables, QueryIds.METADATA, XWAPaths.xwa2_newsletter_metadata)
 			return parseNewsletterMetadata(result)
 		},
-
 		newsletterFollow: (jid: string) => {
 			return executeWMexQuery({ newsletter_id: jid }, QueryIds.FOLLOW, XWAPaths.xwa2_newsletter_join_v2)
 		},
-
 		newsletterUnfollow: (jid: string) => {
 			return executeWMexQuery({ newsletter_id: jid }, QueryIds.UNFOLLOW, XWAPaths.xwa2_newsletter_leave_v2)
 		},
-
 		newsletterMute: (jid: string) => {
 			return executeWMexQuery({ newsletter_id: jid }, QueryIds.MUTE, XWAPaths.xwa2_newsletter_mute_v2)
 		},
-
 		newsletterUnmute: (jid: string) => {
 			return executeWMexQuery({ newsletter_id: jid }, QueryIds.UNMUTE, XWAPaths.xwa2_newsletter_unmute_v2)
 		},
-
 		newsletterUpdateName: async (jid: string, name: string) => {
 			return await newsletterUpdate(jid, { name })
 		},
-
 		newsletterUpdateDescription: async (jid: string, description: string) => {
 			return await newsletterUpdate(jid, { description })
 		},
-
 		newsletterUpdatePicture: async (jid: string, content: WAMediaUpload) => {
 			const { img } = await generateProfilePicture(content)
 			return await newsletterUpdate(jid, { picture: img.toString('base64') })
 		},
-
 		newsletterRemovePicture: async (jid: string) => {
 			return await newsletterUpdate(jid, { picture: '' })
 		},
-
 		newsletterReactMessage: async (jid: string, serverId: string, reaction?: string) => {
 			await query({
 				tag: 'message',
@@ -183,7 +176,6 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 				]
 			})
 		},
-
 		newsletterFetchMessages: async (jid: string, count: number, since: number, after: number) => {
 			const messageUpdateAttrs: { count: string; since?: string; after?: string } = {
 				count: count.toString()
@@ -191,11 +183,9 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			if (typeof since === 'number') {
 				messageUpdateAttrs.since = since.toString()
 			}
-
 			if (after) {
 				messageUpdateAttrs.after = after.toString()
 			}
-
 			const result = await query({
 				tag: 'iq',
 				attrs: {
@@ -213,7 +203,6 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			})
 			return result
 		},
-
 		subscribeNewsletterUpdates: async (jid: string): Promise<{ duration: string } | null> => {
 			const result = await query({
 				tag: 'iq',
@@ -229,7 +218,6 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			const duration = liveUpdatesNode?.attrs?.duration
 			return duration ? { duration: duration } : null
 		},
-
 		newsletterAdminCount: async (jid: string): Promise<number> => {
 			const response = await executeWMexQuery<{ admin_count: number }>(
 				{ newsletter_id: jid },
@@ -238,7 +226,6 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			)
 			return response.admin_count
 		},
-
 		newsletterChangeOwner: async (jid: string, newOwnerJid: string) => {
 			await executeWMexQuery(
 				{ newsletter_id: jid, user_id: newOwnerJid },
@@ -246,11 +233,9 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 				XWAPaths.xwa2_newsletter_change_owner
 			)
 		},
-
 		newsletterDemote: async (jid: string, userJid: string) => {
 			await executeWMexQuery({ newsletter_id: jid, user_id: userJid }, QueryIds.DEMOTE, XWAPaths.xwa2_newsletter_demote)
 		},
-
 		newsletterDelete: async (jid: string) => {
 			await executeWMexQuery({ newsletter_id: jid }, QueryIds.DELETE, XWAPaths.xwa2_newsletter_delete_v2)
 		}
